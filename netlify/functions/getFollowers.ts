@@ -138,7 +138,6 @@ async function fetchXFollowers(): Promise<number | null> {
         'User-Agent':
           'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
         Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
       },
     });
 
@@ -146,50 +145,53 @@ async function fetchXFollowers(): Promise<number | null> {
     const html = await res.text();
     console.log('[X] body length:', html.length);
 
-    if (!res.ok || !html) {
-      console.log('[X] aborting: bad status or empty body');
-      return null;
+    if (!res.ok || !html) return null;
+
+    // Strategy 1: brute-force regex for "followers_count":NNNN anywhere in the payload
+    const regexMatches = [...html.matchAll(/"followers_count"\s*:\s*(\d+)/g)];
+    if (regexMatches.length > 0) {
+      // If multiple matches, take the largest — usually the profile owner's count
+      // (smaller numbers are often "friends_count" misreads or related accounts)
+      const counts = regexMatches.map((m) => parseInt(m[1], 10)).filter((n) => Number.isFinite(n));
+      const largest = Math.max(...counts);
+      console.log(`[X] regex found ${counts.length} matches, picking largest:`, largest);
+      console.log(`[X] all matches:`, counts);
+      return largest;
     }
 
-    // Find the embedded Next.js data blob
-    const match = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-    if (!match) {
-      // Fallback: log a slice of HTML so we can see what changed
-      console.log('[X] __NEXT_DATA__ regex did not match');
-      console.log('[X] html sample (first 500):', html.slice(0, 500));
-      console.log('[X] html sample (mid 500):', html.slice(Math.floor(html.length / 2), Math.floor(html.length / 2) + 500));
-      return null;
+    // Strategy 2: alt key name X uses sometimes
+    const altMatch = html.match(/"normal_followers_count"\s*:\s*(\d+)/);
+    if (altMatch) {
+      const count = parseInt(altMatch[1], 10);
+      console.log('[X] matched normal_followers_count:', count);
+      return count;
     }
 
-    let data: any;
-    try {
-      data = JSON.parse(match[1]);
-    } catch (parseErr) {
-      console.error('[X] JSON.parse failed:', parseErr);
-      console.log('[X] raw match (first 300):', match[1].slice(0, 300));
-      return null;
-    }
-
-    // Try every plausible path — log which one wins
-    const paths: Array<{ name: string; val: any }> = [
-      { name: 'pageProps.contextProvider.user.followers_count', val: data?.props?.pageProps?.contextProvider?.user?.followers_count },
-      { name: 'pageProps.user.followers_count',                  val: data?.props?.pageProps?.user?.followers_count },
-      { name: 'pageProps.headerInfo.user.followers_count',       val: data?.props?.pageProps?.headerInfo?.user?.followers_count },
-      { name: 'pageProps.contextProvider.user.public_metrics',   val: data?.props?.pageProps?.contextProvider?.user?.public_metrics?.followers_count },
-      { name: 'pageProps.timeline.entries[0].user',              val: data?.props?.pageProps?.timeline?.entries?.[0]?.content?.user?.followers_count },
-    ];
-
-    for (const p of paths) {
-      if (typeof p.val === 'number') {
-        console.log(`[X] matched path: ${p.name} =`, p.val);
-        return p.val;
+    // Strategy 3: JSON walking through __NEXT_DATA__, including headerProps this time
+    const nextData = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+    if (nextData) {
+      try {
+        const data = JSON.parse(nextData[1]);
+        const pp = data?.props?.pageProps;
+        const candidates = [
+          pp?.headerProps?.user?.followers_count,
+          pp?.headerProps?.user?.public_metrics?.followers_count,
+          pp?.headerProps?.followers_count,
+          pp?.contextProvider?.user?.followers_count,
+          pp?.user?.followers_count,
+        ];
+        const found = candidates.find((c) => typeof c === 'number');
+        if (found) {
+          console.log('[X] matched via __NEXT_DATA__ headerProps:', found);
+          return found;
+        }
+        console.log('[X] headerProps sample:', JSON.stringify(pp?.headerProps ?? {}).slice(0, 800));
+      } catch (e) {
+        console.error('[X] JSON.parse failed:', e);
       }
     }
 
-    // Nothing matched — dump the top-level keys so we can update the parser
-    console.log('[X] no path matched. top-level keys:', Object.keys(data ?? {}));
-    console.log('[X] pageProps keys:', Object.keys(data?.props?.pageProps ?? {}));
-    console.log('[X] pageProps sample:', JSON.stringify(data?.props?.pageProps ?? {}).slice(0, 800));
+    console.log('[X] all strategies failed');
     return null;
   } catch (err) {
     console.error('[X] error:', err);
