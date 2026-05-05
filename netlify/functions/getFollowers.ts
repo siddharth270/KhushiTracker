@@ -80,16 +80,19 @@ async function fetchLinkedInFollowers(): Promise<number | null> {
   return LINKEDIN_MANUAL;
 }
 
-export const handler: Handler = async () => {
+export const handler: Handler = async (event) => {
   const now = Date.now();
+  const bypass = event.queryStringParameters?.fresh === '1';
 
-  if (cache && now - cache.timestamp < CACHE_TTL_MS) {
+  if (!bypass && cache && now - cache.timestamp < CACHE_TTL_MS) {
     return {
       statusCode: 200,
       headers: { 'Content-Type': 'application/json', 'X-Cache': 'HIT' },
       body: JSON.stringify({ ...cache.data, cachedAt: cache.timestamp, servedFromCache: true }),
     };
   }
+
+  console.log('--- Cache miss/bypass, fetching all platforms ---');
 
   console.log('--- Cache miss, fetching all platforms ---');
   const [x, instagram, linkedin] = await Promise.all([
