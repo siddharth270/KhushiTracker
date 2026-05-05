@@ -1,5 +1,5 @@
 import type { Handler } from '@netlify/functions';
-import { getStore } from '@netlify/blobs';
+
 
 interface FollowerData {
   x: number | null;
@@ -54,60 +54,44 @@ const DEFAULT_IG_STATE: IGState = {
   callsThisMonth: 0,
 };
 
+let igState: IGState = {
+  lastScrapedAt: 0,
+  lastKnownCount: null,
+  monthKey: new Date().toISOString().slice(0, 7),
+  callsThisMonth: 0,
+};
+
 async function fetchInstagramFollowers(): Promise<number | null> {
-  const store = getStore('follower-cache');
   const now = Date.now();
   const currentMonth = new Date().toISOString().slice(0, 7);
 
-  // Load persistent state (survives Lambda cold starts)
-  let state: IGState;
-  try {
-    const raw = await store.get('ig-state', { type: 'json' });
-    state = (raw as IGState | null) ?? { ...DEFAULT_IG_STATE, monthKey: currentMonth };
-  } catch (err) {
-    console.error('[IG] blob read error:', err);
-    state = { ...DEFAULT_IG_STATE, monthKey: currentMonth };
+  if (igState.monthKey !== currentMonth) {
+    igState.monthKey = currentMonth;
+    igState.callsThisMonth = 0;
   }
 
-  // Reset monthly counter if the month rolled over
-  if (state.monthKey !== currentMonth) {
-    state.monthKey = currentMonth;
-    state.callsThisMonth = 0;
-  }
-
-  const sinceLastCall = now - state.lastScrapedAt;
+  const sinceLastCall = now - igState.lastScrapedAt;
   const underInterval = sinceLastCall < IG_SCRAPER_INTERVAL_MS;
-  const overBudget = state.callsThisMonth >= IG_MONTHLY_BUDGET;
+  const overBudget = igState.callsThisMonth >= IG_MONTHLY_BUDGET;
 
-  // GUARD 1: throttled — too soon since last Apify call
   if (underInterval) {
     const remaining = Math.ceil((IG_SCRAPER_INTERVAL_MS - sinceLastCall) / 1000);
-    console.log(
-      `[IG] throttled — next scrape in ${remaining}s. ` +
-        `Returning cached: ${state.lastKnownCount}`,
-    );
-    return state.lastKnownCount;
+    console.log(`[IG] throttled — next scrape in ${remaining}s. Returning cached: ${igState.lastKnownCount}`);
+    return igState.lastKnownCount;
   }
 
-  // GUARD 2: monthly budget exhausted
   if (overBudget) {
-    console.log(
-      `[IG] monthly budget hit (${state.callsThisMonth}/${IG_MONTHLY_BUDGET}). ` +
-        `Returning cached: ${state.lastKnownCount}`,
-    );
-    return state.lastKnownCount;
+    console.log(`[IG] monthly budget hit (${igState.callsThisMonth}/${IG_MONTHLY_BUDGET}). Returning cached: ${igState.lastKnownCount}`);
+    return igState.lastKnownCount;
   }
 
-  // OK to call Apify
   const token = process.env.APIFY_TOKEN;
   if (!token) {
     console.error('[IG] APIFY_TOKEN env var not set');
-    return state.lastKnownCount;
+    return igState.lastKnownCount;
   }
 
-  console.log(
-    `[IG] calling Apify (call ${state.callsThisMonth + 1}/${IG_MONTHLY_BUDGET} this month)`,
-  );
+  console.log(`[IG] calling Apify (call ${igState.callsThisMonth + 1}/${IG_MONTHLY_BUDGET} this month)`);
 
   try {
     const apifyRes = await fetch(
@@ -120,46 +104,32 @@ async function fetchInstagramFollowers(): Promise<number | null> {
     );
 
     console.log('[IG] Apify status:', apifyRes.status);
-
-    // Increment counter and timestamp BEFORE checking response — even on error
-    // Apify may have charged the run. This is the safest budget-protection.
-    state.callsThisMonth += 1;
-    state.lastScrapedAt = now;
+    igState.callsThisMonth += 1;
+    igState.lastScrapedAt = now;
 
     if (!apifyRes.ok) {
       const errBody = await apifyRes.text();
       console.error('[IG] Apify failed:', errBody.slice(0, 300));
-      await store.setJSON('ig-state', state);
-      return state.lastKnownCount;
+      return igState.lastKnownCount;
     }
 
     const items: any = await apifyRes.json();
     const count = items?.[0]?.followersCount ?? null;
 
     if (typeof count === 'number') {
-      state.lastKnownCount = count;
+      igState.lastKnownCount = count;
       console.log('[IG] live count:', count);
     } else {
-      console.log(
-        '[IG] Apify returned no count, keeping cached:',
-        state.lastKnownCount,
-      );
+      console.log('[IG] Apify returned no count, keeping cached:', igState.lastKnownCount);
     }
 
-    await store.setJSON('ig-state', state);
-    return state.lastKnownCount;
+    return igState.lastKnownCount;
   } catch (err) {
     console.error('[IG] fetch error:', err);
-    state.lastScrapedAt = now; // still throttle on error
-    try {
-      await store.setJSON('ig-state', state);
-    } catch (writeErr) {
-      console.error('[IG] blob write error:', writeErr);
-    }
-    return state.lastKnownCount;
+    igState.lastScrapedAt = now;
+    return igState.lastKnownCount;
   }
 }
-
 async function fetchXFollowers(): Promise<number | null> {
   try {
     const url = `https://syndication.twitter.com/srv/timeline-profile/screen-name/${X_HANDLE}?showcontext=true`;
