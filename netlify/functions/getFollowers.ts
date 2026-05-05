@@ -133,7 +133,7 @@ async function fetchInstagramFollowers(): Promise<number | null> {
       return state.lastKnownCount;
     }
 
-    const items = await apifyRes.json();
+    const items: any = await apifyRes.json();
     const count = items?.[0]?.followersCount ?? null;
 
     if (typeof count === 'number') {
