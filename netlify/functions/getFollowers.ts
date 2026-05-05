@@ -138,30 +138,59 @@ async function fetchXFollowers(): Promise<number | null> {
         'User-Agent':
           'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
         Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
       },
     });
+
     console.log('[X] status:', res.status);
     const html = await res.text();
     console.log('[X] body length:', html.length);
 
-    if (!res.ok || !html) return null;
-
-    // The page embeds JSON in a <script id="__NEXT_DATA__"> tag
-    const match = html.match(/<script id="__NEXT_DATA__"[^>]*>([^<]+)<\/script>/);
-    if (!match) {
-      console.log('[X] __NEXT_DATA__ not found');
+    if (!res.ok || !html) {
+      console.log('[X] aborting: bad status or empty body');
       return null;
     }
 
-    const data = JSON.parse(match[1]);
-    const user =
-      data?.props?.pageProps?.contextProvider?.user ??
-      data?.props?.pageProps?.user ??
-      data?.props?.pageProps?.headerInfo?.user;
+    // Find the embedded Next.js data blob
+    const match = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+    if (!match) {
+      // Fallback: log a slice of HTML so we can see what changed
+      console.log('[X] __NEXT_DATA__ regex did not match');
+      console.log('[X] html sample (first 500):', html.slice(0, 500));
+      console.log('[X] html sample (mid 500):', html.slice(Math.floor(html.length / 2), Math.floor(html.length / 2) + 500));
+      return null;
+    }
 
-    const count = user?.followers_count ?? user?.public_metrics?.followers_count ?? null;
-    console.log('[X] parsed count:', count);
-    return typeof count === 'number' ? count : null;
+    let data: any;
+    try {
+      data = JSON.parse(match[1]);
+    } catch (parseErr) {
+      console.error('[X] JSON.parse failed:', parseErr);
+      console.log('[X] raw match (first 300):', match[1].slice(0, 300));
+      return null;
+    }
+
+    // Try every plausible path — log which one wins
+    const paths: Array<{ name: string; val: any }> = [
+      { name: 'pageProps.contextProvider.user.followers_count', val: data?.props?.pageProps?.contextProvider?.user?.followers_count },
+      { name: 'pageProps.user.followers_count',                  val: data?.props?.pageProps?.user?.followers_count },
+      { name: 'pageProps.headerInfo.user.followers_count',       val: data?.props?.pageProps?.headerInfo?.user?.followers_count },
+      { name: 'pageProps.contextProvider.user.public_metrics',   val: data?.props?.pageProps?.contextProvider?.user?.public_metrics?.followers_count },
+      { name: 'pageProps.timeline.entries[0].user',              val: data?.props?.pageProps?.timeline?.entries?.[0]?.content?.user?.followers_count },
+    ];
+
+    for (const p of paths) {
+      if (typeof p.val === 'number') {
+        console.log(`[X] matched path: ${p.name} =`, p.val);
+        return p.val;
+      }
+    }
+
+    // Nothing matched — dump the top-level keys so we can update the parser
+    console.log('[X] no path matched. top-level keys:', Object.keys(data ?? {}));
+    console.log('[X] pageProps keys:', Object.keys(data?.props?.pageProps ?? {}));
+    console.log('[X] pageProps sample:', JSON.stringify(data?.props?.pageProps ?? {}).slice(0, 800));
+    return null;
   } catch (err) {
     console.error('[X] error:', err);
     return null;
